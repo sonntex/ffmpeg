@@ -96,6 +96,10 @@ typedef struct SegmentContext {
     int use_strftime;      ///< flag to expand filename with strftime
     int increment_tc;      ///< flag to increment timecode if found
 
+    char *durations_str;   ///< segment durations specification string
+    int64_t *durations;    ///< list of segment duration specification
+    int nb_durations;      ///< number of elments in the durations array
+
     char *times_str;       ///< segment times specification string
     int64_t *times;        ///< list of segment interval specification
     int nb_times;          ///< number of elments in the times array
@@ -659,14 +663,17 @@ static int seg_init(AVFormatContext *s)
                "you can use output_ts_offset instead of it\n");
     }
 
-    if (!!seg->time_str + !!seg->times_str + !!seg->frames_str > 1) {
+    if (!!seg->time_str | !!seg->durations_str + !!seg->times_str + !!seg->frames_str > 1) {
         av_log(s, AV_LOG_ERROR,
-               "segment_time, segment_times, and segment_frames options "
+               "segment_time, segment_durations, segment_times, and segment_frames options "
                "are mutually exclusive, select just one of them\n");
         return AVERROR(EINVAL);
     }
 
-    if (seg->times_str) {
+    if (seg->durations_str) {
+        if ((ret = parse_times(s, &seg->durations, &seg->nb_durations, seg->durations_str)) < 0)
+            return ret;
+    } else if (seg->times_str) {
         if ((ret = parse_times(s, &seg->times, &seg->nb_times, seg->times_str)) < 0)
             return ret;
     } else if (seg->frames_str) {
@@ -854,7 +861,16 @@ static int seg_write_packet(AVFormatContext *s, AVPacket *pkt)
         return AVERROR(EINVAL);
 
 calc_times:
-    if (seg->times) {
+    if (seg->durations) {
+        int i;
+        int segment_count = seg->segment_count < seg->nb_durations ?
+            seg->segment_count : seg->nb_durations - 1;
+        end_pts = 0;
+        for (i = 0; i < segment_count + 1; ++i)
+            end_pts += seg->durations[i];
+        if (segment_count < seg->segment_count)
+            end_pts += seg->durations[segment_count] * (seg->segment_count - segment_count);
+    } else if (seg->times) {
         end_pts = seg->segment_count < seg->nb_times ?
             seg->times[seg->segment_count] : INT64_MAX;
     } else if (seg->frames) {
@@ -904,7 +920,7 @@ calc_times:
         seg->cur_entry.start_pts = av_rescale_q(pkt->pts, st->time_base, AV_TIME_BASE_Q);
         seg->cur_entry.end_time = seg->cur_entry.start_time;
 
-        if (seg->times || (!seg->frames && !seg->use_clocktime) && seg->write_empty)
+        if (seg->durations || seg->times || (!seg->frames && !seg->use_clocktime) && seg->write_empty)
             goto calc_times;
     }
 
@@ -976,6 +992,7 @@ fail:
 
     av_dict_free(&seg->format_options);
     av_opt_free(seg);
+    av_freep(&seg->durations);
     av_freep(&seg->times);
     av_freep(&seg->frames);
     av_freep(&seg->cur_entry.filename);
@@ -1040,6 +1057,7 @@ static const AVOption options[] = {
     { "segment_clocktime_wrap_duration", "set segment clocktime wrapping duration", OFFSET(clocktime_wrap_duration), AV_OPT_TYPE_DURATION, {.i64 = INT64_MAX}, 0, INT64_MAX, E},
     { "segment_time",      "set segment duration",                       OFFSET(time_str),AV_OPT_TYPE_STRING, {.str = NULL},  0, 0,       E },
     { "segment_time_delta","set approximation value used for the segment times", OFFSET(time_delta), AV_OPT_TYPE_DURATION, {.i64 = 0}, 0, 0, E },
+    { "segment_durations", "set segment split duration points",          OFFSET(durations_str),AV_OPT_TYPE_STRING,{.str = NULL},  0, 0,       E },
     { "segment_times",     "set segment split time points",              OFFSET(times_str),AV_OPT_TYPE_STRING,{.str = NULL},  0, 0,       E },
     { "segment_frames",    "set segment split frame numbers",            OFFSET(frames_str),AV_OPT_TYPE_STRING,{.str = NULL},  0, 0,       E },
     { "segment_wrap",      "set number after which the index wraps",     OFFSET(segment_idx_wrap), AV_OPT_TYPE_INT, {.i64 = 0}, 0, INT_MAX, E },
